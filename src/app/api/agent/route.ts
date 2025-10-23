@@ -1,75 +1,85 @@
-import { NextResponse } from 'next/server';
+import { NextResponse } from "next/server";
 
-const ASI1_API_KEY = process.env.ASI1_API_KEY;
+const ASI1_API_KEY = process.env.ASI1_API_KEY!;
+const MODEL = process.env.ASI1_MODEL || "asi1-mini";
+const ASI1_BASE = "https://api.asi1.ai/v1/chat/completions";
 
-export async function POST(request: Request) {
+// optional: keep a user-specific session id if you have auth
+function sessionId() {
+  return `sess_${Date.now()}`;
+}
+
+type Action = "generate" | "analyze" | "replicate";
+
+function toUserPrompt(action: Action, input: any) {
+  switch (action) {
+    case "generate":
+      return `Create a tight YouTube Shorts script (≈25–35s) about: ${input}`;
+    case "analyze":
+      return `Analyze tone, pacing, energy, rhetorical devices, and delivery for this transcript. Return a structured summary:\n\n${input}`;
+    case "replicate":
+      return `Using this tone summary:\n${input?.previousTone}\n\nGenerate a Shorts script on: ${input?.newTopic}`;
+    default:
+      return "Hello";
+  }
+}
+
+export async function POST(req: Request) {
   try {
-    const { action, input } = await request.json();
-
     if (!ASI1_API_KEY) {
-      console.error('Missing ASI1_API_KEY');
-      return NextResponse.json(
-        { error: 'Server configuration error: Missing ASI1_API_KEY' },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "Server missing ASI1_API_KEY" }, { status: 500 });
     }
 
-    let prompt = '';
-    
-    switch (action) {
-      case 'generate':
-        prompt = `Create a YouTube short script about: ${input}`;
-        break;
-      case 'analyze':
-        prompt = `Analyze the tone of this transcript: ${input}`;
-        break;
-      case 'replicate':
-        prompt = `Replicate the previous tone for a video about: ${input.newTopic}`;
-        break;
-      default:
-        return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-    }
+    const { action, input } = (await req.json()) as { action: Action; input: any };
 
-    console.log('Sending to ASI-1:', prompt);
+    const messages = [
+      {
+        role: "system",
+        content:
+          "You are a YouTube Shorts script generator and analyzer. Prefer concise, high-energy, timestamped beats.",
+      },
+      { role: "user", content: toUserPrompt(action, input) },
+    ];
 
-    // Call ASI-1 API
-    const response = await fetch('https://api.asi.fetch.ai/chat', {
-      method: 'POST',
+    const r = await fetch(ASI1_BASE, {
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${ASI1_API_KEY}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ASI1_API_KEY}`,
+        "Content-Type": "application/json",
+        "x-session-id": sessionId(),
       },
       body: JSON.stringify({
-        query: prompt,
-        stream: false
+        model: MODEL,      // e.g., "asi1-mini" or "asi1-fast-agentic"
+        messages,
+        temperature: 0.7,
+        max_tokens: 800,
+        stream: false,
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('ASI-1 API error:', response.status, errorText);
-      throw new Error(`ASI-1 API returned ${response.status}: ${errorText}`);
+    if (!r.ok) {
+      const text = await r.text();
+      console.error("ASI:One API error:", r.status, text);
+      return NextResponse.json(
+        { error: `ASI:One ${r.status}`, details: text },
+        { status: 502 }
+      );
     }
 
-    const data = await response.json();
-    console.log('ASI-1 response:', data);
-    
-    // Extract response from ASI-1
-    const agentResponse = data.response || data.answer || data.message || 'No response';
-    
-    let result;
-    if (action === 'analyze') {
-      result = { analysis: agentResponse };
-    } else {
-      result = { script: agentResponse };
-    }
+    const data = await r.json();
+    const content: string =
+      data?.choices?.[0]?.message?.content ??
+      data?.message ??
+      JSON.stringify(data);
 
-    return NextResponse.json({ success: true, data: result });
+    const normalized =
+      action === "analyze" ? { analysis: content } : { script: content };
 
-  } catch (error) {
-    console.error('API Error:', error);
+    return NextResponse.json({ success: true, data: normalized });
+  } catch (e: any) {
+    console.error("API /agent error:", e);
     return NextResponse.json(
-      { error: 'Failed to communicate with ASI-1: ' + (error as Error).message },
+      { error: "Failed to reach ASI:One", details: String(e?.message ?? e) },
       { status: 500 }
     );
   }
